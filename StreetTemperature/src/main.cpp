@@ -5,77 +5,102 @@
 #include <GxEPD2_BW.h>
 #include <U8g2_for_Adafruit_GFX.h>
 #include <GyverBME280.h>
-#include <microDS3231.h>
-
-//#include <GyverWDT.h>
-//#include <avr/sleep.h>
+#include <PrintString.cpp>
+#include <RTClib.h>
+#include <GyverPower.h>
 
 #define MAX_DISPLAY_BUFFER_SIZE 800
 #define MAX_HEIGHT(EPD) (EPD::HEIGHT <= MAX_DISPLAY_BUFFER_SIZE / (EPD::WIDTH / 8) ? EPD::HEIGHT : MAX_DISPLAY_BUFFER_SIZE / (EPD::WIDTH / 8))
 GxEPD2_BW<GxEPD2_290, MAX_HEIGHT(GxEPD2_290)> display(GxEPD2_290(/*CS=*/SS, /*DC=*/8, /*RST=*/9, /*BUSY=*/7));
 U8G2_FOR_ADAFRUIT_GFX u8g2Fonts;
 GyverBME280 bme;
-MicroDS3231 rtc;
+RTC_DS3231 rtc;
 
-double curTempterature = 15.9;
-double curHumidity = 99;
+float curTempterature = -30.9;
+float curHumidity = 99;
 double curPressure = 777;
+char digitalBuf[3];
 
-class PrintString : public Print, public String
+void showString(String str, int16_t x, int16_t y, int16_t w, int16_t h, const uint8_t *font)
 {
-public:
-  size_t write(uint8_t data) override
-  {
-    return concat(char(data));
-  };
-};
+  u8g2Fonts.setFont(font);
 
-const uint16_t margin = 10;
+  int16_t tw = u8g2Fonts.getUTF8Width(str.c_str());
+  int16_t sx = (w - tw) / 2 + x;
+
+  int16_t th = u8g2Fonts.getFontAscent();
+  int16_t sy = (h - th) / 2 - y;
+
+  u8g2Fonts.setCursor(sx, h - sy);
+  display.drawRect(x, y, w, h, GxEPD_BLACK);
+  u8g2Fonts.print(str);
+}
+
+void showValue(float value, int16_t x, int16_t y, int16_t w, int16_t h, const uint8_t *font, int precision = 1)
+{
+  PrintString strValue;
+  strValue.print(value, precision);
+  showString(strValue, x, y, w, h, font);
+}
+
+void showDateTime(int16_t x, int16_t y, int16_t w, int16_t h, const uint8_t *font)
+{
+  DateTime dt = rtc.now();
+  PrintString str;
+  
+  sprintf(digitalBuf, "%02d", dt.day());
+  str.print(digitalBuf);
+  
+  str.print('.');
+  
+  sprintf(digitalBuf, "%02d", dt.month());
+  str.print(digitalBuf);
+  
+  str.print('.');
+  
+  str.print(dt.year());
+
+  showString(str, x, y, w, h, font);
+}
 
 void updateDisplay()
 {
-  PrintString temperatureStringValue;
-  temperatureStringValue.print(curTempterature, 1);
+  // maxWidth = 296
+  // maxHeight = 128
 
-  PrintString humidityStringValue;
-  humidityStringValue.print(curHumidity, 1);
-
-  PrintString pressureStringValue;
-  pressureStringValue.print(curPressure, 1);
-
-  // int16_t tw = u8g2Fonts.getUTF8Width(valueString.c_str());
-  int16_t x = 0; //(display.width() - tw) / 2;
-  int16_t y1 = 30;
-  int16_t y2 = 60;
-  int16_t y3 = 90;
-  int16_t y4 = 120;
-
-  // display.setPartialWindow(margin, margin, display.width() - 2*margin, display.height() - 2*margin);
-  display.setPartialWindow(0, 0, 500, 500);
+  display.setPartialWindow(0, 0, display.width(), display.height());
   display.firstPage();
 
   do
   {
     display.fillScreen(GxEPD_WHITE);
-    u8g2Fonts.setCursor(x, y1);
-    u8g2Fonts.print(temperatureStringValue);
-    u8g2Fonts.setCursor(x, y2);
-    u8g2Fonts.print(humidityStringValue);
-    u8g2Fonts.setCursor(x, y3);
-    u8g2Fonts.print(pressureStringValue);
-    u8g2Fonts.setCursor(x, y4);
-    u8g2Fonts.print(rtc.getDateString());
-    u8g2Fonts.setCursor(x+150, y4);
-    u8g2Fonts.print(rtc.getTimeString());
+
+    // Temperature
+    showValue(curTempterature, 1, 1, 232, 96, u8g2_font_logisoso78_tn);
+
+    // Pressure
+    // showValue(curHumidity, 232, 0, 64, 64);
+    showValue(curPressure, 232, 65, 64, 32, u8g2_font_logisoso20_tn, 0);
+
+    // DateTime
+    showDateTime(1, 96, 232, 32, u8g2_font_logisoso20_tn);
+
+    // Humidity
+    showValue(curHumidity, 232, 96, 64, 32, u8g2_font_logisoso20_tn);
+
+    if (rtc.lostPower())
+    {
+      display.drawLine(8, 102, 16, 110, GxEPD_BLACK);
+      display.drawLine(8, 110, 16, 102, GxEPD_BLACK);
+    }
   } while (display.nextPage());
 }
 
 void getTemp()
 {
   curTempterature = bme.readTemperature();
-  curPressure = bme.readPressure();
+  curPressure = bme.readPressure() / 133.3;
   curHumidity = bme.readHumidity();
-  Serial.println("Values updated");
 }
 
 void showError()
@@ -88,24 +113,28 @@ void setup()
   Serial.begin(9600);
   Serial.println("Start");
 
+  power.hardwareDisable(PWR_ADC | PWR_TIMER1);
+  power.setSystemPrescaler(PRESCALER_2);
+  power.setSleepMode(STANDBY_SLEEP);
+  power.bodInSleep(false);
+
   // запуск датчика и проверка на работоспособность
   if (!bme.begin(0x76))
   {
-    showError();  
+    showError();
   }
 
-  if (!rtc.begin()) {
+  if (!rtc.begin())
+  {
     Serial.println("DS3231 not found");
   }
-  rtc.setTime(COMPILE_TIME);
+
+  //rtc.adjust(DateTime(__DATE__, __TIME__));
 
   display.init();
-  display.setTextColor(GxEPD_BLACK);
   display.firstPage();
   display.setRotation(1);
-
   u8g2Fonts.begin(display);
-  delay(1000);
 
   uint16_t bg = GxEPD_WHITE;
   uint16_t fg = GxEPD_BLACK;
@@ -115,8 +144,10 @@ void setup()
   do
   {
     display.fillScreen(GxEPD_WHITE);
-    // u8g2Fonts.setFont(u8g2_font_logisoso92_tn);
-    u8g2Fonts.setFont(u8g2_font_logisoso20_tn);
+    display.drawRect(0, 0, 296, 128, GxEPD_BLACK);
+    display.drawLine(232, 0, 232, 128, GxEPD_BLACK);
+    display.drawLine(0, 96, 296, 96, GxEPD_BLACK);
+    display.drawLine(232, 64, 296, 64, GxEPD_BLACK);
   } while (display.nextPage());
 }
 
@@ -124,16 +155,6 @@ void loop()
 {
   getTemp();
   updateDisplay();
-  delay(1000);
-
-  // Watchdog.enable(ISR_MODE, WDT_TIMEOUT_1S);
-  // display.powerOff();
-  // sleep_enable();
-  // sleep_cpu();
+  
+  power.sleepDelay(60000);
 }
-
-// ISR(WATCHDOG) {
-//   sleep_disable();
-//   Watchdog.disable();
-//   getTemp();
-// }
